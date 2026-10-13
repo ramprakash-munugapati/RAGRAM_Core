@@ -1,0 +1,9 @@
+sqlalchemy>=2.0.30
+pgvector>=0.3.0
+psycopg[binary]>=3.1.19
+openai>=1.40.0
+python-dotenv>=1.0.0
+
+# Optional: local HuggingFace embeddings.
+# Only needed when RAGRAM_EMBEDDING_PROVIDER=huggingface.
+sentence-transformers>=3.0.0
