@@ -21,6 +21,7 @@ and the LLM can each be replaced without touching the orchestration logic.
 - [Usage](#usage)
   - [Verification script](#verification-script)
   - [Programmatic usage](#programmatic-usage)
+  - [Web UI (Streamlit)](#web-ui-streamlit)
 - [Integrating with other systems](#integrating-with-other-systems)
   - [Using an existing production PostgreSQL database](#using-an-existing-production-postgresql-database)
   - [Embedding in a FastAPI service](#embedding-in-a-fastapi-service)
@@ -50,6 +51,8 @@ and the LLM can each be replaced without touching the orchestration logic.
   grounding system prompt.
 - **Environment-driven config** — no hardcoded credentials or model names.
 - **Idempotent ingestion** — deterministic chunk ids upsert on re-ingest.
+- **Streaming answers** — token-by-token synthesis (`stream_query`).
+- **Web UI** — a Streamlit front-end for querying, source inspection, and ingestion.
 
 ---
 
@@ -346,6 +349,29 @@ try:
 finally:
     storage.disconnect()
 ```
+
+### Web UI (Streamlit)
+
+`app.py` is a thin Streamlit front-end over `RagramCoreEngine`:
+
+- **Query tab** — ask grounded questions; answers **stream** token-by-token, and each
+  response lists its retrieved chunks with cosine distances and metadata.
+- **Ingest tab** — index pasted text or uploaded files (`.txt`, `.md`, `.csv`, `.json`),
+  chunked, embedded, and upserted into `ragram_chunks`.
+- **Sidebar** — connection status plus live `top_k` / `max_distance` controls.
+
+```bash
+pip install streamlit          # already in requirements.txt
+streamlit run app.py
+```
+
+The app opens at `http://localhost:8501` and reads the same `.env` configuration as
+`main.py`. It needs valid PostgreSQL and OpenAI credentials in `.env`; if they are
+missing, the UI loads and reports the error instead of crashing.
+
+> Uses the streaming engine API: `RagramCoreEngine.retrieve()` returns the filtered
+> chunks, and `stream_query()` yields answer tokens (or the refusal string — without
+> calling the LLM — when no relevant context is found).
 
 ---
 
@@ -720,7 +746,7 @@ the refusal message stays consistent regardless of which layer triggers it.
 
 ## Roadmap
 
-- Public `retrieve()` helper and a first-party LangChain/LlamaIndex retriever.
+- Public `retrieve()` helper (done) and a first-party LangChain/LlamaIndex retriever.
 - Hybrid search (BM25 + vector) and metadata-filtered retrieval.
 - Async adapters and batch-upsert ingestion.
 - Additional adapters (pgvector+pgvectorscale, Qdrant, Weaviate, Pinecone).

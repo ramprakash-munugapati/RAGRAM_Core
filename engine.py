@@ -10,6 +10,7 @@ EmbeddingProvider, LLMClient), so every layer is swappable.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,6 +28,21 @@ class QueryResult:
     answer: str
     sources: list[RetrievedChunk] = field(default_factory=list)
     context_used: bool = False  # False => refusal path, LLM never invoked
+
+
+@dataclass(frozen=True)
+class QueryStream:
+    """Handle returned by `RagramCoreEngine.stream_query()`.
+
+    Retrieval happens eagerly, so `sources`/`context_used` are already known
+    when the object is returned; `tokens` yields the grounded answer
+    incrementally. When no context was found, `tokens` yields the refusal
+    string and the LLM is never called.
+    """
+
+    sources: list[RetrievedChunk]
+    context_used: bool
+    tokens: Iterator[str]
 
 
 class RagramCoreEngine:
@@ -95,8 +111,12 @@ class RagramCoreEngine:
     # Retrieval + synthesis
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str) -> QueryResult:
-        """Answer `user_query` strictly from the stored knowledge base."""
+    def retrieve(self, user_query: str) -> list[RetrievedChunk]:
+        """Vectorize `user_query` and return relevant chunks (best first).
+
+        Applies the `max_distance` relevance filter, so an empty list means
+        "nothing relevant in the knowledge base".
+        """
         question = user_query.strip()
         if not question:
             raise ValueError("Query cannot be empty.")
@@ -110,16 +130,55 @@ class RagramCoreEngine:
         # 3. Relevance filter: drop chunks beyond the distance cutoff.
         if self._max_distance is not None:
             results = [chunk for chunk in results if chunk.distance <= self._max_distance]
+        return results
 
-        # 4. Hard anti-hallucination guard: with no grounded context there is
-        #    nothing legitimate to synthesize, so never call the LLM.
-        if not results:
-            return QueryResult(answer=NO_CONTEXT_ANSWER, sources=[], context_used=False)
-
-        # 5. Synthesize a grounded answer from the retrieved chunks.
-        user_prompt = (
-            f"Retrieved context chunks:\n\n{build_context_block(results)}\n\n"
+    def _build_user_prompt(self, contexts: list[RetrievedChunk], question: str) -> str:
+        """Assemble the context-grounded user prompt for the LLM."""
+        return (
+            f"Retrieved context chunks:\n\n{build_context_block(contexts)}\n\n"
             f"User question: {question}"
         )
-        answer = self._synthesizer.synthesize(SYSTEM_PROMPT, user_prompt)
-        return QueryResult(answer=answer, sources=results, context_used=True)
+
+    def query(self, user_query: str) -> QueryResult:
+        """Answer `user_query` strictly from the stored knowledge base."""
+        question = user_query.strip()
+        if not question:
+            raise ValueError("Query cannot be empty.")
+
+        contexts = self.retrieve(question)
+
+        # Hard anti-hallucination guard: with no grounded context there is
+        # nothing legitimate to synthesize, so never call the LLM.
+        if not contexts:
+            return QueryResult(answer=NO_CONTEXT_ANSWER, sources=[], context_used=False)
+
+        answer = self._synthesizer.synthesize(
+            SYSTEM_PROMPT, self._build_user_prompt(contexts, question)
+        )
+        return QueryResult(answer=answer, sources=contexts, context_used=True)
+
+    def stream_query(self, user_query: str) -> QueryStream:
+        """Like `query()`, but stream the answer token-by-token.
+
+        Returns a `QueryStream` whose `tokens` iterator can be consumed by a
+        UI (e.g. Streamlit's `st.write_stream`) for progressive rendering.
+        """
+        question = user_query.strip()
+        if not question:
+            raise ValueError("Query cannot be empty.")
+
+        contexts = self.retrieve(question)
+
+        if not contexts:
+            # Same refusal guarantee as query(): no context => no LLM call.
+            return QueryStream(
+                sources=[], context_used=False, tokens=iter([NO_CONTEXT_ANSWER])
+            )
+
+        return QueryStream(
+            sources=contexts,
+            context_used=True,
+            tokens=self._synthesizer.synthesize_stream(
+                SYSTEM_PROMPT, self._build_user_prompt(contexts, question)
+            ),
+        )
