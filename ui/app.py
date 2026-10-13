@@ -4,23 +4,32 @@ A thin front-end over `RagramCoreEngine`: ask grounded questions with streamed
 answers and source inspection, and index new documents.
 
 Run:
-    streamlit run app.py
+    streamlit run ui/app.py
 """
 
 from __future__ import annotations
 
-import atexit
-import json
+import sys
+from pathlib import Path
 
-import streamlit as st
+# The core modules live flat in the project root; Streamlit puts this script's
+# directory (ui/) on sys.path, so add the parent so `import engine` etc. resolve.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-from adapters.base import RetrievedChunk
-from adapters.postgres_adapter import PostgresVectorAdapter
-from config import Settings
-from embeddings import EmbeddingProvider, create_embedding_provider
-from engine import QueryStream, RagramCoreEngine
-from llm import OpenAILLMClient
-from prompts import NO_CONTEXT_ANSWER
+import atexit  # noqa: E402
+import json  # noqa: E402
+
+import streamlit as st  # noqa: E402
+
+from adapters.base import RetrievedChunk  # noqa: E402
+from adapters.postgres_adapter import PostgresVectorAdapter  # noqa: E402
+from config import Settings  # noqa: E402
+from embeddings import EmbeddingProvider, create_embedding_provider  # noqa: E402
+from engine import QueryStream, RagramCoreEngine  # noqa: E402
+from llm import OpenAILLMClient  # noqa: E402
+from prompts import NO_CONTEXT_ANSWER  # noqa: E402
 
 st.set_page_config(page_title="RAGRAM Core", layout="wide")
 

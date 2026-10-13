@@ -4,7 +4,7 @@ psycopg[binary]>=3.1.19
 openai>=1.40.0
 python-dotenv>=1.0.0
 
-# Web UI (streamlit run app.py)
+# Web UI (streamlit run ui/app.py)
 streamlit>=1.36.0
 
 # Optional: local HuggingFace embeddings.

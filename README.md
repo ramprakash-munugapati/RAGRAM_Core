@@ -196,10 +196,12 @@ RAGRAM_Core/
 ├── chunking.py               # recursive_character_split()
 ├── config.py                 # Settings.from_env()
 ├── embeddings.py             # EmbeddingProvider (ABC) + OpenAI / HuggingFace
-├── engine.py                 # RagramCoreEngine, QueryResult
+├── engine.py                 # RagramCoreEngine, QueryResult, QueryStream
 ├── llm.py                    # LLMClient (ABC) + OpenAILLMClient
 ├── prompts.py                # SYSTEM_PROMPT, NO_CONTEXT_ANSWER, build_context_block()
 ├── main.py                   # verification script
+├── ui/
+│   └── app.py                # Streamlit web UI
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -352,7 +354,7 @@ finally:
 
 ### Web UI (Streamlit)
 
-`app.py` is a thin Streamlit front-end over `RagramCoreEngine`:
+`ui/app.py` is a thin Streamlit front-end over `RagramCoreEngine`:
 
 - **Query tab** — ask grounded questions; answers **stream** token-by-token, and each
   response lists its retrieved chunks with cosine distances and metadata.
@@ -362,7 +364,7 @@ finally:
 
 ```bash
 pip install streamlit          # already in requirements.txt
-streamlit run app.py
+streamlit run ui/app.py
 ```
 
 The app opens at `http://localhost:8501` and reads the same `.env` configuration as
