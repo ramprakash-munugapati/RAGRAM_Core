@@ -27,6 +27,11 @@ and the LLM can each be replaced without touching the orchestration logic.
   - [Swapping the storage backend](#swapping-the-storage-backend)
   - [LangChain / LlamaIndex interop](#langchain--llamaindex-interop)
   - [Batch / ETL ingestion](#batch--etl-ingestion)
+- [Exposing RAGRAM as a tool](#exposing-ragram-as-a-tool)
+  - [As an MCP tool](#as-an-mcp-tool)
+  - [As an OpenAI function/tool](#as-an-openai-functiontool)
+  - [As a LangChain tool](#as-a-langchain-tool)
+  - [As a CLI](#as-a-cli)
 - [Anti-hallucination design](#anti-hallucination-design)
 - [API reference](#api-reference)
 - [Troubleshooting](#troubleshooting)
@@ -49,6 +54,64 @@ and the LLM can each be replaced without touching the orchestration logic.
 ---
 
 ## Architecture
+
+### Component view
+
+```mermaid
+flowchart LR
+    subgraph Engine["RagramCoreEngine (engine.py)"]
+        ING["ingest_document()"]
+        QRY["query()"]
+    end
+
+    VS["VectorStorageInterface<br/>(adapters/base.py)"]
+    EP["EmbeddingProvider<br/>(embeddings.py)"]
+    LC["LLMClient<br/>(llm.py)"]
+
+    PG[("PostgreSQL + pgvector<br/>ragram_chunks")]
+    OAI["OpenAI API"]
+    HFL["HuggingFace<br/>SentenceTransformers"]
+
+    ING --> EP
+    ING --> VS
+    QRY --> EP
+    QRY --> VS
+    QRY --> LC
+
+    VS --> PG
+    EP -. openai .-> OAI
+    LC -. openai .-> OAI
+    EP -. huggingface .-> HFL
+```
+
+### Query data flow
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant E as RagramCoreEngine
+    participant EP as EmbeddingProvider
+    participant VS as VectorStorageInterface
+    participant DB as PostgreSQL (pgvector)
+    participant LLM as LLMClient
+
+    User->>E: query(text)
+    E->>EP: embed_query(text)
+    EP-->>E: query vector
+    E->>VS: similarity_search(vector, limit=top_k)
+    VS->>DB: ORDER BY embedding <=> :vec LIMIT k
+    DB-->>VS: rows with cosine distance
+    VS-->>E: RetrievedChunk[]
+    alt no chunk within max_distance
+        E-->>User: refusal (LLM never called)
+    else grounded context
+        E->>LLM: synthesize(SYSTEM_PROMPT, context)
+        LLM-->>E: grounded answer
+        E-->>User: QueryResult(answer, sources)
+    end
+```
+
+### Detailed ingest / query flow
 
 ```
                               RagramCoreEngine
@@ -456,6 +519,150 @@ for row in source_rows:                       # e.g. rows from your existing DB
 
 For very large corpora, ingest in a background worker and batch embeddings through the
 provider; the OpenAI provider already sends whole batches in a single API call.
+
+---
+
+## Exposing RAGRAM as a tool
+
+`RagramCoreEngine.query()` is a plain synchronous call, so it drops into any agent or
+tool-calling framework. The recipes below build on the public API; only the MCP recipe
+adds a dependency (`pip install "mcp[cli]"`).
+
+### As an MCP tool
+
+Serve RAGRAM over the Model Context Protocol (stdio transport) so MCP clients such as
+Claude Desktop or opencode can call it as a tool.
+
+```python
+# tools/mcp_server.py
+from mcp.server.fastmcp import FastMCP
+
+from config import Settings
+from embeddings import create_embedding_provider
+from adapters.postgres_adapter import PostgresVectorAdapter
+from engine import RagramCoreEngine
+from llm import OpenAILLMClient
+
+settings = Settings.from_env()
+embedder = create_embedding_provider(settings)
+storage = PostgresVectorAdapter(settings.sqlalchemy_url, dimension=embedder.dimension)
+storage.connect()
+engine = RagramCoreEngine(
+    storage, embedder,
+    OpenAILLMClient(settings.llm_model, settings.openai_api_key),
+    top_k=settings.top_k, max_distance=settings.max_distance,
+)
+
+mcp = FastMCP("ragram-core")
+
+@mcp.tool()
+def ragram_query(question: str) -> dict:
+    """Answer a question strictly from the indexed knowledge base.
+
+    Returns the grounded answer, whether context was used, and the source chunks.
+    """
+    result = engine.query(question)
+    return {
+        "answer": result.answer,
+        "context_used": result.context_used,
+        "sources": [{"chunk_id": s.chunk_id, "distance": s.distance} for s in result.sources],
+    }
+
+if __name__ == "__main__":
+    mcp.run()  # stdio transport by default
+```
+
+Register it with an MCP client, e.g.:
+
+```json
+{
+  "mcpServers": {
+    "ragram-core": { "command": "python", "args": ["tools/mcp_server.py"] }
+  }
+}
+```
+
+### As an OpenAI function/tool
+
+Advertise RAGRAM as a callable tool to a chat-completions agent.
+
+```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "ragram_query",
+        "description": "Answer a question strictly from the RAGRAM knowledge base; "
+                       "refuses when the answer is not in the indexed context.",
+        "parameters": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"],
+        },
+    },
+}]
+
+# Dispatch the model's tool call back into the engine.
+def ragram_query(question: str) -> str:
+    return engine.query(question).answer
+```
+
+### As a LangChain tool
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def ragram_query(question: str) -> str:
+    """Answer strictly from the RAGRAM knowledge base; refuses if unsupported."""
+    return engine.query(question).answer
+```
+
+### As a CLI
+
+Wrap the engine in a minimal entrypoint for scripts and CI checks.
+
+```python
+# cli.py
+import argparse, json
+
+from config import Settings
+from embeddings import create_embedding_provider
+from adapters.postgres_adapter import PostgresVectorAdapter
+from engine import RagramCoreEngine
+from llm import OpenAILLMClient
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="ragram")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    q = sub.add_parser("query"); q.add_argument("question")
+
+    args = parser.parse_args()
+    settings = Settings.from_env()
+    embedder = create_embedding_provider(settings)
+    storage = PostgresVectorAdapter(settings.sqlalchemy_url, dimension=embedder.dimension)
+    storage.connect()
+    try:
+        engine = RagramCoreEngine(
+            storage, embedder,
+            OpenAILLMClient(settings.llm_model, settings.openai_api_key),
+        )
+        if args.cmd == "query":
+            result = engine.query(args.question)
+            print(json.dumps({
+                "answer": result.answer,
+                "context_used": result.context_used,
+                "sources": [s.chunk_id for s in result.sources],
+            }, indent=2))
+    finally:
+        storage.disconnect()
+
+if __name__ == "__main__":
+    main()
+```
+
+```bash
+python cli.py query "Where does RAGRAM Core store vectors?"
+```
 
 ---
 
