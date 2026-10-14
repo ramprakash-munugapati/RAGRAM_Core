@@ -20,6 +20,14 @@ the core logic.
 | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Install everything and run your first query, step by step. |
 | [docs/CONCEPTS.md](docs/CONCEPTS.md) | Plain-English explanations of RAG, embeddings, vectors, and every other term. |
 
+Want to see more before diving in? These tools turn the repository itself into
+something you can explore:
+
+- **[gitingest](https://gitingest.com/ramprakash-munugapati/ragram_core)** — the whole
+  codebase as one readable, digestible text file.
+- **[gitdiagram](https://gitdiagram.com/ramprakash-munugapati/ragram_core)** — an
+  auto-generated diagram of how the code fits together.
+
 ---
 
 ## Table of contents

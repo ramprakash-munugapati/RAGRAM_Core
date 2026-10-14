@@ -327,5 +327,9 @@ Keep this handy while reading the code.
 - **Read the code:** start with `engine.py` (the coordinator), then
   `adapters/postgres_adapter.py` (the database part) and `prompts.py` (the grounding
   rules).
+- **Explore visually:** [gitingest](https://gitingest.com/ramprakash-munugapati/ragram_core)
+  renders the whole codebase as one text file, and
+  [gitdiagram](https://gitdiagram.com/ramprakash-munugapati/ragram_core) draws how the
+  code fits together.
 
 Welcome to RAG. It's a small idea with a big payoff.

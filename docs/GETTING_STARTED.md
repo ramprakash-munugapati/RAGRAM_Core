@@ -318,5 +318,10 @@ If you want the full explanation of each step, read
       embeddings, or LLM.
 - [ ] Try changing `RAGRAM_CHUNK_SIZE` and `RAGRAM_TOP_K` to feel how retrieval
       quality changes.
+- [ ] Explore the code visually with
+      [gitingest](https://gitingest.com/ramprakash-munugapati/ragram_core) (whole repo
+      as one text file) or
+      [gitdiagram](https://gitdiagram.com/ramprakash-munugapati/ragram_core) (how the
+      code fits together).
 
 Happy building!
