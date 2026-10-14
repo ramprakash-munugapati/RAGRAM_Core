@@ -1,17 +1,31 @@
-# RAGRAM_Core
+# RAGRAM Core
 
-**Vector-only baseline tier of the RAGRAM framework.**
+**A small, readable starting point for building RAG on your own PostgreSQL database.**
 
-RAGRAM Core is a minimal, production-oriented **Naive RAG** (retrieval-augmented
-generation) pipeline that runs directly on an existing **PostgreSQL** database via
-the **`pgvector`** extension. It is intentionally domain-agnostic and built around a
-strict **Repository / Adapter** pattern, so the storage backend, the embedding model,
-and the LLM can each be replaced without touching the orchestration logic.
+RAGRAM Core is a minimal, well-labelled **Naive RAG** (retrieval-augmented generation)
+starter. You give it your text; it stores that text as vectors inside an ordinary
+PostgreSQL database using the `pgvector` extension; later you ask questions and get
+answers built strictly from *your* text — with the exact sources shown, and an honest
+"I cannot find sufficient information..." when the answer isn't there.
+
+It's small enough to read in an afternoon, yet organised enough to grow: the database,
+the embedding model, and the language model can each be swapped out without rewriting
+the core logic.
+
+> **New to RAG?** You're in the right place. Start with the guides below, then come
+> back here for the details. You don't need any machine-learning background.
+
+| Guide | What it's for |
+| --- | --- |
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Install everything and run your first query, step by step. |
+| [docs/CONCEPTS.md](docs/CONCEPTS.md) | Plain-English explanations of RAG, embeddings, vectors, and every other term. |
 
 ---
 
 ## Table of contents
 
+- [What is RAG?](#what-is-rag)
+- [How RAGRAM Core works](#how-ragram-core-works)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Project structure](#project-structure)
@@ -41,22 +55,88 @@ and the LLM can each be replaced without touching the orchestration logic.
 
 ---
 
+## What is RAG?
+
+RAG stands for **Retrieval-Augmented Generation**. In one line: *look up the relevant
+text first, hand it to the AI, and ask the AI to answer using only that text.*
+
+That's it. The AI (the "generation" part) isn't answering from memory — it's answering
+from your documents, which we just found and handed to it (the "retrieval" and
+"augmented" parts). This small change is what makes the answers trustworthy and
+traceable to real sources.
+
+Why bother, instead of just asking an AI directly?
+
+- **It knows your data.** The AI can't know your notes, handbook, or database — but RAG
+  hands it the relevant parts.
+- **It makes things up less.** With only real text to work from, the model is far less
+  likely to invent an answer.
+- **It stays current.** Your text lives in your database and is looked up fresh on every
+  question, so it can be as new as you like.
+
+Want the full story, with analogies? See
+[docs/CONCEPTS.md](docs/CONCEPTS.md). The short version is below.
+
+---
+
+## How RAGRAM Core works
+
+Two phases, one small file each in your head:
+
+**1. Ingestion (once per document)**
+
+```
+your text  ─►  cut into small chunks  ─►  turn each chunk into a vector  ─►  store in PostgreSQL
+```
+
+**2. Query (every time you ask something)**
+
+```
+your question  ─►  turn it into a vector  ─►  find the closest chunks in PostgreSQL
+      │
+      ├─ nothing close enough?  ─►  say "I cannot find sufficient information..." (AI is never called)
+      │
+      └─ found relevant chunks  ─►  ask the AI to answer using ONLY those chunks
+                                        └─► answer + the exact sources used
+```
+
+The "vector" is just a list of numbers that captures the *meaning* of a piece of text.
+Similar meaning → similar numbers, which is how "find the closest chunks" becomes a
+quick maths lookup instead of keyword matching. (Prefer keyword search? That's a
+different technique — this project is the vector one on purpose.)
+
+That last branch — refusing when nothing relevant is found — is the most important
+safety feature here, and it's explained in
+[Anti-hallucination design](#anti-hallucination-design).
+
+---
+
 ## Features
 
-- **Naive RAG over pgvector** — cosine-distance k-NN search with an HNSW index.
-- **Adapter pattern** — `VectorStorageInterface` decouples the engine from Postgres.
-- **Pluggable embeddings** — OpenAI Embeddings or local HuggingFace SentenceTransformers.
-- **Recursive character chunking** — paragraph/sentence-aware splitting with overlap.
-- **Two-layer anti-hallucination** — an engine-level context guard *and* a strict
-  grounding system prompt.
-- **Environment-driven config** — no hardcoded credentials or model names.
-- **Idempotent ingestion** — deterministic chunk ids upsert on re-ingest.
-- **Streaming answers** — token-by-token synthesis (`stream_query`).
-- **Web UI** — a Streamlit front-end for querying, source inspection, and ingestion.
+Written plainly, with the technical name in parentheses for when you're ready:
+
+- **Similarity search with Postgres** — finds the most relevant chunks by cosine
+  distance, sped up by an HNSW index (Naive RAG over pgvector).
+- **Swappable database** — the engine talks to an interface, not to Postgres directly
+  (the Adapter pattern via `VectorStorageInterface`).
+- **Swappable embeddings** — use OpenAI's embeddings, or run a small model on your own
+  machine for free (`EmbeddingProvider`).
+- **Smart chunking** — splits text at natural boundaries (paragraphs, then sentences)
+  with overlap, so ideas aren't cut in half (`recursive_character_split`).
+- **Two layers of anti-hallucination** — a hard rule in code *and* a strict instruction
+  to the AI, so answers stay grounded.
+- **No hardcoded secrets** — everything comes from environment variables / `.env`.
+- **Safe to re-run** — ingesting the same document again updates it instead of
+  duplicating it (idempotent upsert).
+- **Streaming answers** — the reply appears word by word (`stream_query`).
+- **A friendly web UI** — a Streamlit app for asking questions, viewing sources, and
+  adding documents (`ui/app.py`).
 
 ---
 
 ## Architecture
+
+If you only read one diagram, read this one. It shows how a question is answered.
 
 ### Component view
 
@@ -86,6 +166,11 @@ flowchart LR
     LC -. openai .-> OAI
     EP -. huggingface .-> HFL
 ```
+
+The engine sits in the middle and depends on three **interfaces** (the dashed boxes).
+Any of them can be replaced by another implementation without touching the engine. The
+only concrete pieces shipped today are a Postgres adapter, OpenAI/HuggingFace
+embeddings, and an OpenAI synthesizer — but the shape is deliberately pluggable.
 
 ### Query data flow
 
@@ -166,12 +251,14 @@ sequenceDiagram
       └───────────────────────────────────────────┘
 ```
 
-**Query flow:** encode the question → cosine k-NN over `ragram_chunks` → drop chunks
-farther than `max_distance` → if nothing remains, return the refusal string without
-calling the LLM → otherwise synthesize a grounded answer.
+**In words:** a question is turned into a vector, PostgreSQL finds the nearest chunk
+vectors (cosine distance), chunks that are too far away are dropped, and — if anything
+relevant remains — those chunks are handed to the AI with instructions to answer only
+from them, and cite their ids. If nothing relevant remains, the AI is never called.
 
-**The pgvector primitive:** nearest-neighbour ordering compiles to the `<=>` cosine
-distance operator and is accelerated by an HNSW index using `vector_cosine_ops`:
+**The pgvector query.** The "nearest chunks" search compiles to this SQL. `<=>` is
+pgvector's cosine-distance operator, and the HNSW index (`vector_cosine_ops`) makes it
+fast:
 
 ```sql
 CREATE INDEX ix_ragram_chunks_embedding_hnsw
@@ -192,7 +279,7 @@ RAGRAM_Core/
 ├── adapters/
 │   ├── __init__.py
 │   ├── base.py               # VectorStorageInterface (ABC) + RetrievedChunk
-│   └── postgres_adapter.py   # PostgresVectorAdapter (pgvector implementation)
+│   └── postgres_adapter.py   # PostgresVectorAdapter (the pgvector implementation)
 ├── chunking.py               # recursive_character_split()
 ├── config.py                 # Settings.from_env()
 ├── embeddings.py             # EmbeddingProvider (ABC) + OpenAI / HuggingFace
@@ -202,21 +289,34 @@ RAGRAM_Core/
 ├── main.py                   # verification script
 ├── ui/
 │   └── app.py                # Streamlit web UI
+├── docs/
+│   ├── GETTING_STARTED.md    # step-by-step first run
+│   └── CONCEPTS.md           # plain-English concepts + glossary
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
 
-> **Imports are flat.** Modules are imported as `from engine import RagramCoreEngine`,
-> `from adapters.postgres_adapter import PostgresVectorAdapter`, etc.
+**A good reading order for the code:** `engine.py` (the coordinator that ties
+everything together) → `adapters/postgres_adapter.py` (all the database work) →
+`prompts.py` (the rules that keep answers honest).
+
+> **Imports are flat.** Modules import each other like `from engine import
+> RagramCoreEngine` and `from adapters.postgres_adapter import PostgresVectorAdapter`.
 
 ---
 
 ## Requirements
 
-- Python 3.10+
-- PostgreSQL with the **`pgvector`** extension installed on the server
-- One embedding backend: an OpenAI API key, **or** `sentence-transformers` installed
+- **Python 3.10 or newer.**
+- **PostgreSQL** with the **`pgvector`** extension available on the server.
+- For embeddings: an **OpenAI API key**, *or* `sentence-transformers` installed for the
+  free local option.
+- For the answer-writing step (by default): an **OpenAI API key**.
+
+New to all this? The [Getting Started guide](docs/GETTING_STARTED.md) walks through
+installing each of these — including the easiest way to get PostgreSQL + pgvector (a
+single Docker command).
 
 ---
 
@@ -239,36 +339,37 @@ copy .env.example .env          # Windows
 # cp .env.example .env          # macOS / Linux
 ```
 
-The adapter also issues `CREATE EXTENSION IF NOT EXISTS vector` on `connect()`, so a
-superuser run is only needed the first time if the extension is not yet present.
+RAGRAM Core also tries to create the pgvector extension automatically when it connects,
+so the superuser step is only needed the first time if the extension isn't present yet.
 
 ---
 
 ## Configuration
 
-All configuration is read from environment variables (optionally via a `.env` file).
-Nothing is hardcoded.
+Everything is configured through environment variables (usually via your `.env` file).
+Nothing is hardcoded — no secrets or model names live in the code.
 
-| Variable | Default | Description |
+| Variable | Default | What it does |
 | --- | --- | --- |
-| `RAGRAM_PG_HOST` | `localhost` | PostgreSQL host |
-| `RAGRAM_PG_PORT` | `5432` | PostgreSQL port |
+| `RAGRAM_PG_HOST` | `localhost` | Database host |
+| `RAGRAM_PG_PORT` | `5432` | Database port |
 | `RAGRAM_PG_USER` | `postgres` | Database user |
 | `RAGRAM_PG_PASSWORD` | _(empty)_ | Database password |
 | `RAGRAM_PG_DBNAME` | `ragram` | Database name |
 | `RAGRAM_EMBEDDING_PROVIDER` | `openai` | `openai` or `huggingface` |
-| `RAGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model id |
-| `RAGRAM_EMBEDDING_DIM` | `1536` | Must match the model output size |
-| `RAGRAM_LLM_MODEL` | `gpt-4o-mini` | Synthesis model |
-| `OPENAI_API_KEY` / `RAGRAM_OPENAI_API_KEY` | _(none)_ | OpenAI key for embeddings + synthesis |
+| `RAGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | Which embedding model to use |
+| `RAGRAM_EMBEDDING_DIM` | `1536` | Must match the model's output size |
+| `RAGRAM_LLM_MODEL` | `gpt-4o-mini` | Which model writes the final answer |
+| `OPENAI_API_KEY` / `RAGRAM_OPENAI_API_KEY` | _(none)_ | OpenAI key for embeddings + answers |
 | `RAGRAM_CHUNK_SIZE` | `900` | Max characters per chunk |
-| `RAGRAM_CHUNK_OVERLAP` | `150` | Overlap between adjacent chunks |
-| `RAGRAM_TOP_K` | `5` | Chunks retrieved per query |
-| `RAGRAM_MAX_DISTANCE` | `0.5` | Cosine-distance cutoff; `none` disables filtering |
+| `RAGRAM_CHUNK_OVERLAP` | `150` | Characters shared between neighbouring chunks |
+| `RAGRAM_TOP_K` | `5` | How many chunks to retrieve per question |
+| `RAGRAM_MAX_DISTANCE` | `0.5` | Relevance cutoff; `none` turns the filter off |
 
-**Dimension cheat-sheet:** `text-embedding-3-small` → `1536`;
-`sentence-transformers/all-MiniLM-L6-v2` → `384`. `RAGRAM_EMBEDDING_DIM` **must**
-match, otherwise writes and queries raise a clear dimension error.
+**Which dimension do I need?** `text-embedding-3-small` → `1536`;
+`sentence-transformers/all-MiniLM-L6-v2` → `384`. `RAGRAM_EMBEDDING_DIM` **must** match
+your embedding model, or you'll get a clear dimension error on the first write or query.
+(Why? See [CONCEPTS.md](docs/CONCEPTS.md) section 5.)
 
 ---
 
@@ -276,14 +377,14 @@ match, otherwise writes and queries raise a clear dimension error.
 
 ### Verification script
 
-`main.py` initializes the schema, ingests a sample document, then runs an in-scope
-query (answered from context) and an out-of-scope query (triggers the refusal path).
+The quickest way to see the whole pipeline work. It creates the schema, indexes a short
+sample document, then runs two queries — one it can answer, and one it can't.
 
 ```bash
 python main.py
 ```
 
-Expected shape of output:
+Expected output:
 
 ```
 Connecting to PostgreSQL at localhost:5432...
@@ -305,6 +406,9 @@ context_used: False
 answer: I cannot find sufficient information in the current database context.
 ```
 
+The first query is answered from the text and lists its source. The second isn't in the
+text, so RAGRAM Core refuses instead of guessing — that's the behavior we *want*.
+
 ### Programmatic usage
 
 ```python
@@ -314,18 +418,18 @@ from adapters.postgres_adapter import PostgresVectorAdapter
 from engine import RagramCoreEngine
 from llm import OpenAILLMClient
 
-# 1. Configuration (from env / .env)
+# 1. Read configuration from the environment / .env file.
 settings = Settings.from_env()
 
-# 2. Components (each is swappable — see the integrations section)
+# 2. Build the three pluggable pieces (swap any of them -- see below).
 embedder = create_embedding_provider(settings)
 storage = PostgresVectorAdapter(
     settings.sqlalchemy_url,
-    dimension=embedder.dimension,   # pins the VECTOR(dim) column
+    dimension=embedder.dimension,   # this pins the VECTOR(dim) column size
 )
 synthesizer = OpenAILLMClient(settings.llm_model, settings.openai_api_key)
 
-# 3. Initialize schema, then wire the engine
+# 3. Create the table/index, then wire the pieces together in the engine.
 storage.connect()
 engine = RagramCoreEngine(
     storage, embedder, synthesizer,
@@ -336,62 +440,66 @@ engine = RagramCoreEngine(
 )
 
 try:
-    # 4. Ingest
+    # 4. Add a document.
     chunk_ids = engine.ingest_document(
         "RAGRAM Core stores vectors in PostgreSQL using pgvector.",
         metadata={"source": "handbook.pdf", "page": 1},
     )
 
-    # 5. Query
+    # 5. Ask a question.
     result = engine.query("Where does RAGRAM Core store vectors?")
-    print(result.answer)              # grounded answer with [chunk:...] citations
-    print(result.context_used)        # False when the refusal path was taken
-    for source in result.sources:     # RetrievedChunk objects
+    print(result.answer)              # the grounded answer, with [chunk:...] citations
+    print(result.context_used)        # False means it took the refusal path
+    for source in result.sources:     # the chunks that were used
         print(source.chunk_id, source.distance, source.metadata)
 finally:
-    storage.disconnect()
+    storage.disconnect()              # always clean up the connection
 ```
 
 ### Web UI (Streamlit)
 
-`ui/app.py` is a thin Streamlit front-end over `RagramCoreEngine`:
+`ui/app.py` is a small Streamlit front-end over the engine — no extra frontend build
+step.
 
-- **Query tab** — ask grounded questions; answers **stream** token-by-token, and each
-  response lists its retrieved chunks with cosine distances and metadata.
-- **Ingest tab** — index pasted text or uploaded files (`.txt`, `.md`, `.csv`, `.json`),
-  chunked, embedded, and upserted into `ragram_chunks`.
-- **Sidebar** — connection status plus live `top_k` / `max_distance` controls.
+- **Query tab** — ask questions; answers **stream** in word by word, and each response
+  lists the chunks it used, with their distances and metadata.
+- **Ingest tab** — add your own text by pasting or uploading a `.txt`, `.md`, `.csv`, or
+  `.json` file.
+- **Sidebar** — connection status, plus live `top_k` and `max_distance` controls so you
+  can feel how retrieval changes.
 
 ```bash
 pip install streamlit          # already in requirements.txt
 streamlit run ui/app.py
 ```
 
-The app opens at `http://localhost:8501` and reads the same `.env` configuration as
-`main.py`. It needs valid PostgreSQL and OpenAI credentials in `.env`; if they are
-missing, the UI loads and reports the error instead of crashing.
+Open `http://localhost:8501`. It reads the same `.env` as `main.py`, so it needs valid
+PostgreSQL and OpenAI credentials; if something's missing it shows a message instead of
+crashing.
 
-> Uses the streaming engine API: `RagramCoreEngine.retrieve()` returns the filtered
-> chunks, and `stream_query()` yields answer tokens (or the refusal string — without
-> calling the LLM — when no relevant context is found).
+> Under the hood it uses `RagramCoreEngine.retrieve()` and `stream_query()`: retrieval
+> happens first (so sources are known immediately), then the answer streams in — and the
+> refusal path still never calls the LLM.
 
 ---
 
 ## Integrating with other systems
 
+RAGRAM Core is built to slot into things you already run. Below are recipes; each one
+uses the public API.
+
 ### Using an existing production PostgreSQL database
 
-RAGRAM Core is designed to attach to a database you already run:
+You don't need a separate database just for RAG. Point RAGRAM Core at your existing one:
 
-1. **Reuse the connection** — point `RAGRAM_PG_*` at your existing instance and
-   database. The framework creates one dedicated table (`ragram_chunks`, configurable
-   via `PostgresVectorAdapter(..., table_name="...")`) and never touches your tables.
-2. **Install the extension once** — `CREATE EXTENSION IF NOT EXISTS vector;` requires
-   `CREATE` privilege on the database (superuser, or a DBA-run migration).
-3. **Isolate in a schema** (optional) — set `search_path` or qualify the table name
-   (e.g. `table_name="rag.ragram_chunks"`) to keep RAG objects separate.
-4. **Scale reads** — the adapter uses SQLAlchemy pooling (`pool_pre_ping=True`), so it
-   is safe behind connection poolers such as PgBouncer.
+1. **Reuse your connection** — set `RAGRAM_PG_*` to your instance. It creates exactly one
+   table (`ragram_chunks`, renameable via `table_name=`) and never touches your others.
+2. **Enable the extension once** — `CREATE EXTENSION IF NOT EXISTS vector;` needs
+   `CREATE` privilege on the database (a superuser, or a one-time DBA migration).
+3. **Keep it tidy (optional)** — put RAG objects in their own schema, e.g.
+   `table_name="rag.ragram_chunks"`.
+4. **It pools connections** — the adapter uses SQLAlchemy pooling with
+   `pool_pre_ping=True`, so it plays nicely behind a pooler like PgBouncer.
 
 ```python
 from adapters.postgres_adapter import PostgresVectorAdapter
@@ -399,13 +507,13 @@ from adapters.postgres_adapter import PostgresVectorAdapter
 storage = PostgresVectorAdapter(
     settings.sqlalchemy_url,
     dimension=embedder.dimension,
-    table_name="rag.ragram_chunks",   # dedicated schema for isolation
+    table_name="rag.ragram_chunks",   # keep RAG objects in their own schema
 )
 ```
 
 ### Embedding in a FastAPI service
 
-Build the engine once at startup (the DB pool is reused), then serve queries.
+Build the engine once when the app starts (the DB pool is reused), then serve queries.
 
 ```python
 from contextlib import asynccontextmanager
@@ -458,13 +566,13 @@ def query(body: QueryIn) -> QueryOut:
     )
 ```
 
-> The engine is synchronous. Under an async framework, run `engine.query(...)` in a
-> threadpool (e.g. `anyio.to_thread.run_sync(...)`) so the event loop is not blocked.
+> The engine is synchronous. In an async framework, run `engine.query(...)` in a
+> threadpool (e.g. `anyio.to_thread.run_sync(...)`) so you don't block the event loop.
 
 ### Swapping the storage backend
 
-The engine depends only on `VectorStorageInterface`. To target another store, implement
-the four methods and pass your adapter to the engine — no engine changes required.
+The engine only knows about `VectorStorageInterface`. Implement its four methods, pass
+your adapter in — and the engine doesn't change at all.
 
 ```python
 from typing import Any
@@ -481,12 +589,12 @@ class PineconeAdapter(VectorStorageInterface):
 engine = RagramCoreEngine(PineconeAdapter(...), embedder, synthesizer)
 ```
 
-The same applies to `EmbeddingProvider` (swap in Cohere, Voyage, Ollama, ...) and
-`LLMClient` (swap in Anthropic, Bedrock, a local model, ...).
+The same idea applies to `EmbeddingProvider` (Cohere, Voyage, Ollama, ...) and
+`LLMClient` (Anthropic, Bedrock, a local model, ...).
 
 ### LangChain / LlamaIndex interop
 
-Each abstraction is a thin adapter boundary, so bridging to those frameworks is small.
+Each interface is a thin boundary, so bridging is small. Two common directions:
 
 **Use LangChain embeddings inside RAGRAM** — wrap a LangChain `Embeddings` object:
 
@@ -508,7 +616,7 @@ class LangChainEmbeddingProvider(EmbeddingProvider):
 embedder = LangChainEmbeddingProvider(OpenAIEmbeddings(model="text-embedding-3-small"), 1536)
 ```
 
-**Expose RAGRAM as a LangChain retriever** — use RAGRAM's vector search as the backend:
+**Use RAGRAM as a LangChain retriever** — back it with RAGRAM's vector search:
 
 ```python
 from langchain_core.retrievers import BaseRetriever
@@ -518,47 +626,44 @@ class RagramRetriever(BaseRetriever):
     engine: object  # RagramCoreEngine
 
     def _get_relevant_documents(self, query: str, *, run_manager=None) -> list[Document]:
-        vector = self.engine._embedder.embed_query(query)          # or expose a public helper
-        hits = self.engine._storage.similarity_search(vector, limit=self.engine._top_k)
+        hits = self.engine.retrieve(query)   # public helper: returns the relevant chunks
         return [Document(page_content=h.text, metadata={**h.metadata, "chunk_id": h.chunk_id})
                 for h in hits]
 ```
 
-> The examples above are illustrative bridges built on the public interfaces; they are
-> not shipped as first-party plugins. Prefer constructing adapters explicitly rather
-> than reaching into private attributes in production (a public `retrieve()` helper is
-> on the [roadmap](#roadmap)).
+> These are illustrative bridges built on the public interfaces — not shipped plugins.
+> They're a good starting point, not a fully supported framework integration.
 
 ### Batch / ETL ingestion
 
-`ingest_document()` is synchronous and idempotent, which makes it easy to drive from
-pipelines. Re-ingesting the same content with the same document id overwrites chunks
-instead of duplicating them.
+`ingest_document()` is synchronous and safe to re-run, which makes it easy to drive from
+a pipeline. Re-ingesting the same content overwrites its chunks instead of duplicating
+them.
 
 ```python
 engine = RagramCoreEngine(storage, embedder, synthesizer)
 
-for row in source_rows:                       # e.g. rows from your existing DB
+for row in source_rows:                       # e.g. rows from your existing database
     engine.ingest_document(
         row["body"],
         metadata={"source": row["url"], "entity_id": row["id"]},
     )
 ```
 
-For very large corpora, ingest in a background worker and batch embeddings through the
-provider; the OpenAI provider already sends whole batches in a single API call.
+For very large corpora, run ingestion in a background worker. The OpenAI embedding
+provider already sends batches in a single API call.
 
 ---
 
 ## Exposing RAGRAM as a tool
 
 `RagramCoreEngine.query()` is a plain synchronous call, so it drops into any agent or
-tool-calling framework. The recipes below build on the public API; only the MCP recipe
-adds a dependency (`pip install "mcp[cli]"`).
+tool-calling framework. Only the MCP recipe below adds a dependency
+(`pip install "mcp[cli]"`).
 
 ### As an MCP tool
 
-Serve RAGRAM over the Model Context Protocol (stdio transport) so MCP clients such as
+Serve RAGRAM over the Model Context Protocol (stdio transport) so MCP clients like
 Claude Desktop or opencode can call it as a tool.
 
 ```python
@@ -647,8 +752,6 @@ def ragram_query(question: str) -> str:
 
 ### As a CLI
 
-Wrap the engine in a minimal entrypoint for scripts and CI checks.
-
 ```python
 # cli.py
 import argparse, json
@@ -696,63 +799,73 @@ python cli.py query "Where does RAGRAM Core store vectors?"
 
 ## Anti-hallucination design
 
-Two independent layers prevent fabrication:
+"Hallucination" is when an AI confidently states something false. RAGRAM Core guards
+against it in **two independent ways**, so if one ever fails, the other still holds:
 
-1. **Engine guard (deterministic).** After retrieval, chunks farther than
-   `max_distance` are discarded. If none remain, the engine returns
-   `NO_CONTEXT_ANSWER` and **never calls the LLM** (`context_used=False`).
-2. **Strict system prompt.** When context *is* present, `SYSTEM_PROMPT` forbids using
-   outside knowledge, disallows speculation, requires `[chunk:<id>]` citations, and
-   mandates the exact refusal sentence when the context is insufficient:
+1. **A rule in code (the engine guard).** After retrieval, chunks that are too far away
+   (beyond `max_distance`) are thrown out. If nothing relevant is left, the engine
+   returns the refusal message and **never calls the AI at all** (`context_used=False`).
+   This part is deterministic — it cannot be talked out of it.
+2. **A strict instruction to the AI (the system prompt).** When relevant context *is*
+   present, `SYSTEM_PROMPT` tells the model to use **only** that context, never rely on
+   outside knowledge, cite chunk ids, and reply with this exact sentence if the context
+   doesn't cover the question:
 
    > `I cannot find sufficient information in the current database context.`
 
-Both the guard and the prompt use the same constant (`prompts.NO_CONTEXT_ANSWER`), so
-the refusal message stays consistent regardless of which layer triggers it.
+Both layers use the same constant (`prompts.NO_CONTEXT_ANSWER`), so the refusal message
+is identical no matter which one triggers.
 
 ---
 
 ## API reference
 
-| Symbol | Location | Purpose |
+| Symbol | Where | What it's for |
 | --- | --- | --- |
-| `Settings.from_env()` | `config` | Load + validate env configuration |
-| `VectorStorageInterface` | `adapters.base` | Storage abstraction (`connect`, `disconnect`, `insert_chunk`, `similarity_search`) |
-| `RetrievedChunk` | `adapters.base` | `chunk_id`, `text`, `metadata`, `distance` |
-| `PostgresVectorAdapter` | `adapters.postgres_adapter` | pgvector-backed storage |
-| `EmbeddingProvider` | `embeddings` | Embedding abstraction |
-| `create_embedding_provider(settings)` | `embeddings` | Provider factory |
-| `recursive_character_split(text, size, overlap)` | `chunking` | Chunks a document |
-| `LLMClient` | `llm` | Synthesis abstraction |
-| `OpenAILLMClient(model, api_key)` | `llm` | OpenAI synthesis |
-| `RagramCoreEngine(...)` | `engine` | Pipeline coordinator |
-| `.ingest_document(document, metadata=None)` | `engine` | Returns stored chunk ids |
-| `.query(user_query)` | `engine` | Returns `QueryResult` |
+| `Settings.from_env()` | `config` | Load + validate config from the environment |
+| `VectorStorageInterface` | `adapters.base` | The storage contract: `connect`, `disconnect`, `insert_chunk`, `similarity_search` |
+| `RetrievedChunk` | `adapters.base` | A result chunk: `chunk_id`, `text`, `metadata`, `distance` |
+| `PostgresVectorAdapter` | `adapters.postgres_adapter` | The pgvector-backed storage implementation |
+| `EmbeddingProvider` | `embeddings` | The embedding contract |
+| `create_embedding_provider(settings)` | `embeddings` | Picks OpenAI or HuggingFace from config |
+| `recursive_character_split(text, size, overlap)` | `chunking` | Splits a document into overlapping chunks |
+| `LLMClient` | `llm` | The answer-writing contract |
+| `OpenAILLMClient(model, api_key)` | `llm` | Writes answers with OpenAI (streaming supported) |
+| `RagramCoreEngine(...)` | `engine` | The coordinator that ties everything together |
+| `.ingest_document(document, metadata=None)` | `engine` | Adds a document; returns its chunk ids |
+| `.retrieve(user_query)` | `engine` | Returns the relevant chunks (after the distance filter) |
+| `.query(user_query)` | `engine` | Returns a `QueryResult` |
+| `.stream_query(user_query)` | `engine` | Returns a `QueryStream` for token-by-token answers |
 | `QueryResult` | `engine` | `answer`, `sources`, `context_used` |
-| `SYSTEM_PROMPT`, `NO_CONTEXT_ANSWER` | `prompts` | Grounding prompt + refusal text |
+| `SYSTEM_PROMPT`, `NO_CONTEXT_ANSWER` | `prompts` | The grounding rules + the refusal sentence |
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| What you see | What it means / how to fix |
 | --- | --- |
-| `type "vector" does not exist` | pgvector not installed on the server. Run `CREATE EXTENSION vector;` as a superuser. |
-| `Embedding has dimension N, but the storage schema expects M` | Fix `RAGRAM_EMBEDDING_DIM` to match your model. |
+| `type "vector" does not exist` | pgvector isn't installed in that database. Run `CREATE EXTENSION vector;` as a superuser (or use the Docker image from the guide). |
+| `Embedding has dimension N, but the storage schema expects M` | `RAGRAM_EMBEDDING_DIM` doesn't match your model. Set it to the model's real size (1536 or 384). |
 | `ModuleNotFoundError: psycopg` | Install the driver: `pip install "psycopg[binary]>=3.1"`. |
-| `ModuleNotFoundError: sentence_transformers` | Only needed for `RAGRAM_EMBEDDING_PROVIDER=huggingface`; install `sentence-transformers`. |
-| Every query returns the refusal | `RAGRAM_MAX_DISTANCE` too strict, or the document was never ingested. Try `none` to inspect raw distances. |
-| Connection refused / auth error | Verify `RAGRAM_PG_*` values and that the DB is reachable. |
+| `ModuleNotFoundError: sentence_transformers` | Only needed for `RAGRAM_EMBEDDING_PROVIDER=huggingface`. Install `sentence-transformers`. |
+| Every query returns the refusal | Nothing was ingested, or `RAGRAM_MAX_DISTANCE` is too strict. Try `RAGRAM_MAX_DISTANCE=none` to see the raw distances. |
+| Connection refused / auth error | Check `RAGRAM_PG_*` in `.env` and that the database is reachable. |
+| `streamlit` not found | `pip install streamlit`, then run `python -m streamlit run ui/app.py`. |
+
+More beginner-oriented fixes live in the
+[Getting Started troubleshooting table](docs/GETTING_STARTED.md#troubleshooting).
 
 ---
 
 ## Roadmap
 
-- Public `retrieve()` helper (done) and a first-party LangChain/LlamaIndex retriever.
-- Hybrid search (BM25 + vector) and metadata-filtered retrieval.
+- A first-party LangChain / LlamaIndex retriever (a public `retrieve()` helper is already
+  available).
+- Hybrid search (keyword + vector) and metadata-filtered retrieval.
 - Async adapters and batch-upsert ingestion.
-- Additional adapters (pgvector+pgvectorscale, Qdrant, Weaviate, Pinecone).
-- Evaluation harness (recall@k, groundedness).
+- More storage adapters (pgvectorscale, Qdrant, Weaviate, Pinecone).
+- An evaluation harness (recall@k, groundedness).
 
 ---
 
