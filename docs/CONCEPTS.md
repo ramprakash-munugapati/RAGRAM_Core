@@ -1,4 +1,4 @@
-# Concepts, in plain English
+# Concepts
 
 You do **not** need any machine-learning background to read this page. Every idea is
 explained from scratch, with everyday comparisons. By the end you'll understand what
